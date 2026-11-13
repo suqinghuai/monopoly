@@ -76,4 +76,35 @@ for lead in (0.0, 3.0):
     assert took >= need - 0.05, "电脑确认机会卡太早：lead=%.1f took=%.2f need=%.2f" % (lead, took, need)
     print("[ok] 机会卡 lead=%.1f 弹窗确认后 %.2fs" % (lead, took))
 
+
+def one_buy(lead: float) -> float:
+    g = server.Game()
+    g.db_ok = False
+    g.add_bot()
+    g.add_bot()
+    g.start()
+    p = g.player(g.current)
+    g.phase = "buy"
+    g.pending = 1
+    g.last_steps = 3
+    g.buy_viewed = False
+    g.settle_lead = lead
+    g.bump()
+    time.sleep(0.08)
+    acked = time.time()
+    g.buy_seen("test-client")
+    while g.phase == "buy" and time.time() - acked < 12:
+        time.sleep(0.05)
+    took = time.time() - acked
+    if g.bot_timer:
+        g.bot_timer.cancel()
+    return took
+
+
+for lead in (0.0, 3.0):
+    took = one_buy(lead)
+    need = server.BOT_DELAY["buy"] + server.SETTLE_SHOW_BUFFER
+    assert took >= need - 0.05, "电脑买地/升级决定太早：lead=%.1f took=%.2f need=%.2f" % (lead, took, need)
+    print("[ok] 地契卡 lead=%.1f 显示后 %.2fs 才决定" % (lead, took))
+
 print("SETTLE TIMING PASS")

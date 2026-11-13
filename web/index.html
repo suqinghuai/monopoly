@@ -2838,7 +2838,14 @@
     el.innerHTML = deedCardHTML(st, target);
     el.classList.remove('away');
     // 先脱离 hidden 再加 on，才有放大淡入的过渡
-    requestAnimationFrame(function () { el.classList.add('on'); });
+    requestAnimationFrame(function () {
+      el.classList.add('on');
+      // 地契卡真正显示后回报：电脑从这一刻起停留 2 秒再模拟「思考决定」
+      if (S.token) {
+        api('/api/action?token=' + encodeURIComponent(S.token), { action: 'buy_seen' })
+          .catch(function () { /* 回报失败不影响玩家自己操作 */ });
+      }
+    });
   }
 
   // ---------------------------------------------------------- 面板

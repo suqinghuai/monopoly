@@ -67,7 +67,7 @@ BOT_LEVELS = {
 TRADE_MIN_MARGIN = 120    # 再小的「便宜」也不接：差价不到这份钱就当没看见
 
 BOT_NAMES = ["铁算盘", "阿呆", "小机灵", "财迷", "守财奴", "赌徒", "老掌柜", "账房"]
-BOT_DELAY = {"roll": 2.0, "buy": 1.6, "settle": 2.0, "chance": 2.0}   # 结算/机会卡：弹窗出现后停留 2 秒再「点确定」
+BOT_DELAY = {"roll": 2.0, "buy": 2.0, "settle": 2.0, "chance": 2.0}   # 结算/机会卡/买地升级：弹窗出现后停留 2 秒再「点确定」
 SETTLE_SHOW_BUFFER = 0.2   # SSE / 弹窗渲染的余量，保证「确定」时弹窗已完整显示 2 秒
 POPUP_FALLBACK_EXTRA = 2.5 # 没有客户端回「弹窗已显示」时的兜底余量
 BOT_MOVE_LEAD = 1.1       # 骰子动画 + 落地停留
@@ -633,6 +633,7 @@ class Game:
         self.settle_lead = 0.0               # 本回合结算窗出现前还要播多久动画（电脑自动确认用）
         self.settle_viewed = False           # 是否有客户端已经真正把结算窗显示出来
         self.chance_viewed = False           # 同上，机会卡
+        self.buy_viewed = False              # 同上，买地 / 原地升级的地契卡
         self.land: dict | None = None        # 结算完之后要落的点（买地 / 升级 / 机会）
         self.log: list[dict] = []
         self.log_seq = 0
@@ -725,6 +726,7 @@ class Game:
             self.settle_lead = 0.0            # 载入后直接显示弹窗，不再补播移动
             self.settle_viewed = False
             self.chance_viewed = False
+            self.buy_viewed = False
             self.land = snap.get("land")
             if self.phase == "action":       # 旧存档没有「结算」这个概念，落到行动阶段就直接交棒
                 self.phase = "roll"
@@ -1236,6 +1238,15 @@ class Game:
             self._arm_bot_popup_confirm("chance")
             self.lock.notify_all()
 
+    def buy_seen(self, token: str) -> None:
+        """地契卡（买地 / 原地升级）已经出现在屏幕上。"""
+        with self.lock:
+            if self.phase != "buy" or self.pending is None or self.buy_viewed:
+                return
+            self.buy_viewed = True
+            self._arm_bot_popup_confirm("buy")
+            self.lock.notify_all()
+
     def _arm_bot_popup_confirm(self, phase: str) -> None:
         """弹窗已显示：把兜底计时换成精确的「再等 2 秒」。调用方持锁。"""
         cur = self.player(self.current) if self.current is not None else None
@@ -1321,6 +1332,7 @@ class Game:
         if kind == "buy":
             self.pending = tile["i"]
             self.phase = "buy"
+            self.buy_viewed = False
             self.say(f"{p['name']} 走到「{tile['name']}」，无主地，要不要买", "buy", p["id"])
             return
         if kind == "own":
@@ -1340,6 +1352,7 @@ class Game:
                 return
             self.pending = tile["i"]
             self.phase = "buy"
+            self.buy_viewed = False
             self.say(f"{p['name']} 回到自己的「{tile['name']}」，可以花 {cost} 升级", "buy", p["id"])
             return
         if kind == "chance":
@@ -1542,6 +1555,7 @@ class Game:
         self.settle_lead = 0.0
         self.settle_viewed = False
         self.chance_viewed = False
+        self.buy_viewed = False
         self.turn_no += 1
         for x in self.players:
             x.pop("ai_plan", None)          # 上一回合的计划作废，别被下一次存档带进新回合
@@ -1594,9 +1608,12 @@ class Game:
             delay = BOT_DELAY["chance"] + SETTLE_SHOW_BUFFER + max(0.0, self.settle_lead)
             if not self.chance_viewed:
                 delay += POPUP_FALLBACK_EXTRA
-        # 掷完骰子的那一帧要先把「骰子 + 逐格移动」播完，再让它做买地 / 升级的决定
-        elif self.phase == "buy" and self.last_steps:
-            delay = max(delay, BOT_MOVE_LEAD + BOT_STEP_ANIM * min(self.last_steps, 12))
+        elif self.phase == "buy":
+            # 地契卡要等骰子 + 走格动画播完才出现；出现后电脑再停留 2 秒做决定
+            anim_lead = (BOT_MOVE_LEAD + BOT_STEP_ANIM * min(self.last_steps, 12)) if self.last_steps else 0.0
+            delay = BOT_DELAY["buy"] + SETTLE_SHOW_BUFFER + anim_lead
+            if not self.buy_viewed:
+                delay += POPUP_FALLBACK_EXTRA
         if self.phase == "buy" and cur.get("brain") == "ai" and ai_brain.ok:
             delay += 0.4               # AI 要多等一小会儿，前端才来得及显示「正在思考」
         self._arm(self._bot_step, delay, self.version, self.current, self.phase)
@@ -2583,6 +2600,9 @@ class Game:
             return
         if action == "chance_seen":
             self.chance_seen(token)
+            return
+        if action == "buy_seen":
+            self.buy_seen(token)
             return
         if pid is None:
             raise ValueError("观战者不能操作棋盘")
