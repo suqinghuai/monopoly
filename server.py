@@ -67,15 +67,14 @@ BOT_LEVELS = {
 TRADE_MIN_MARGIN = 120    # 再小的「便宜」也不接：差价不到这份钱就当没看见
 
 BOT_NAMES = ["铁算盘", "阿呆", "小机灵", "财迷", "守财奴", "赌徒", "老掌柜", "账房"]
-BOT_DELAY = {"roll": 1.15, "buy": 1.6, "settle": 2.0, "chance": 2.0}   # 结算弹窗：停留 2 秒再「点确定」
+BOT_DELAY = {"roll": 2.0, "buy": 1.6, "settle": 2.0, "chance": 2.0}   # 结算/机会卡：弹窗出现后停留 2 秒再「点确定」
+SETTLE_SHOW_BUFFER = 0.2   # SSE / 弹窗渲染的余量，保证「确定」时弹窗已完整显示 2 秒
+POPUP_FALLBACK_EXTRA = 2.5 # 没有客户端回「弹窗已显示」时的兜底余量
 BOT_MOVE_LEAD = 1.1       # 骰子动画 + 落地停留
 BOT_STEP_ANIM = 0.17      # 棋子每格的动画时长
-# 结算窗前端的展示时序：骰子 2.6s + 每格 0.172s + 收尾 0.16s，弹窗才出现。
-# 电脑必须在这之后再等 2 秒才自动点「确定」，否则弹窗还没出现，回合已经过去了。
-SETTLE_ANIM_BASE = 2.6
-SETTLE_STEP_ANIM = 0.172
-SETTLE_ANIM_TAIL = 0.16
-SETTLE_SHOW_BUFFER = 0.2   # SSE / 弹窗渲染的余量，保证「确定」时弹窗已完整显示 2 秒
+SETTLE_ANIM_BASE = 2.6    # 骰子动画
+SETTLE_STEP_ANIM = 0.172  # 每格走棋
+SETTLE_ANIM_TAIL = 0.16   # 收尾
 
 # ---------------------------------------------------------------- AI 玩家（方案 A）
 # 电脑有两种大脑：local（本地启发式）与 ai（走 OpenAI 兼容接口）。AI 只负责「提建议」，
@@ -632,6 +631,8 @@ class Game:
         self.chance: dict | None = None      # 待确认的机会卡（玩家点「确定」后才生效）
         self.settles: list[dict] = []        # 待确认的结算事件（租金 / 工资 / 税费…），确认后才动钱
         self.settle_lead = 0.0               # 本回合结算窗出现前还要播多久动画（电脑自动确认用）
+        self.settle_viewed = False           # 是否有客户端已经真正把结算窗显示出来
+        self.chance_viewed = False           # 同上，机会卡
         self.land: dict | None = None        # 结算完之后要落的点（买地 / 升级 / 机会）
         self.log: list[dict] = []
         self.log_seq = 0
@@ -722,6 +723,8 @@ class Game:
             self.chance = snap.get("chance")
             self.settles = snap.get("settles") or []
             self.settle_lead = 0.0            # 载入后直接显示弹窗，不再补播移动
+            self.settle_viewed = False
+            self.chance_viewed = False
             self.land = snap.get("land")
             if self.phase == "action":       # 旧存档没有「结算」这个概念，落到行动阶段就直接交棒
                 self.phase = "roll"
@@ -1204,6 +1207,7 @@ class Game:
             e = self.settles[0]
             self.phase = "settle"
             self.pending = None
+            self.settle_viewed = False
             kind = e["type"]
             self.say("%s：%s，等确认" % (p["name"], e.get("text") or ""),
                      "pay" if kind in ("rent", "tax") else ("gain" if kind in ("salary", "park") else "info"),
@@ -1213,6 +1217,35 @@ class Game:
                        name=e.get("name"), icon=e.get("icon"))
             return
         self._land_start(p)
+
+    def settle_seen(self, token: str) -> None:
+        """任一客户端把结算窗真正画到屏幕上后回报；电脑从这一刻起再等 2 秒。"""
+        with self.lock:
+            if self.phase != "settle" or not self.settles or self.settle_viewed:
+                return
+            self.settle_viewed = True
+            self._arm_bot_popup_confirm("settle")
+            self.lock.notify_all()
+
+    def chance_seen(self, token: str) -> None:
+        """同上，机会卡已经出现在屏幕上。"""
+        with self.lock:
+            if self.phase != "chance" or not self.chance or self.chance_viewed:
+                return
+            self.chance_viewed = True
+            self._arm_bot_popup_confirm("chance")
+            self.lock.notify_all()
+
+    def _arm_bot_popup_confirm(self, phase: str) -> None:
+        """弹窗已显示：把兜底计时换成精确的「再等 2 秒」。调用方持锁。"""
+        cur = self.player(self.current) if self.current is not None else None
+        if not cur or cur.get("kind") != "bot" or not cur["alive"]:
+            return
+        if self.bot_timer is not None:
+            self.bot_timer.cancel()
+            self.bot_timer = None
+        self._arm(self._bot_step, BOT_DELAY[phase] + SETTLE_SHOW_BUFFER,
+                  self.version, self.current, phase)
 
     def settle_ok(self, pid: int) -> None:
         """落点玩家点「确定」：这时才真正扣钱 / 加钱，然后自动进入下一步或结束回合。"""
@@ -1315,6 +1348,7 @@ class Game:
             self.chance["pid"] = p["id"]
             self.chance["name"] = p["name"]
             self.phase = "chance"
+            self.chance_viewed = False
             self.say(f"{p['name']} 抽到「{card['text']}」，等待确认", "chance", p["id"])
             self.event("chance", pid=p["id"], text=card["text"], icon=card.get("icon", "spark"),
                        delta=card.get("delta"), move=card.get("move"), goto=card.get("goto"),
@@ -1506,6 +1540,8 @@ class Game:
         self.land = None
         self.last_steps = 0
         self.settle_lead = 0.0
+        self.settle_viewed = False
+        self.chance_viewed = False
         self.turn_no += 1
         for x in self.players:
             x.pop("ai_plan", None)          # 上一回合的计划作废，别被下一次存档带进新回合
@@ -1549,8 +1585,15 @@ class Game:
             return
         delay = BOT_DELAY.get(self.phase, 1.0)
         if self.phase == "settle":
-            # 等前端把骰子 + 走格动画播完、结算窗真正出现，再停留 2 秒
+            # 等前端把骰子 + 走格动画播完、结算窗真正出现，再停留 2 秒；
+            # 有客户端回报「弹窗已显示」时只等 2 秒，没回报时多留兜底时间。
             delay = BOT_DELAY["settle"] + SETTLE_SHOW_BUFFER + max(0.0, self.settle_lead)
+            if not self.settle_viewed:
+                delay += POPUP_FALLBACK_EXTRA
+        elif self.phase == "chance":
+            delay = BOT_DELAY["chance"] + SETTLE_SHOW_BUFFER + max(0.0, self.settle_lead)
+            if not self.chance_viewed:
+                delay += POPUP_FALLBACK_EXTRA
         # 掷完骰子的那一帧要先把「骰子 + 逐格移动」播完，再让它做买地 / 升级的决定
         elif self.phase == "buy" and self.last_steps:
             delay = max(delay, BOT_MOVE_LEAD + BOT_STEP_ANIM * min(self.last_steps, 12))
@@ -2534,6 +2577,12 @@ class Game:
                 self.remove_bot(int(payload.get("pid", 0)))
             elif action == "bot_level":
                 self.set_bot_level(int(payload.get("pid", 0)), str(payload.get("level", "")))
+            return
+        if action == "settle_seen":
+            self.settle_seen(token)
+            return
+        if action == "chance_seen":
+            self.chance_seen(token)
             return
         if pid is None:
             raise ValueError("观战者不能操作棋盘")

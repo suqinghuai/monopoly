@@ -25,11 +25,13 @@ def one_round(lead: float) -> float:
         "name": "停车场", "icon": "park", "text": "停在停车场，拿奖金 150",
     }]
     g.settle_lead = lead
-    t0 = time.time()
     g.bump()
-    while g.settles and time.time() - t0 < 12:
+    time.sleep(0.08)
+    acked = time.time()
+    g.settle_seen("test-client")       # 模拟前端已经画出结算窗
+    while g.settles and time.time() - acked < 12:
         time.sleep(0.05)
-    took = time.time() - t0
+    took = time.time() - acked
     if g.bot_timer:
         g.bot_timer.cancel()
     return took
@@ -37,8 +39,41 @@ def one_round(lead: float) -> float:
 
 for lead in (0.0, 3.0):
     took = one_round(lead)
-    need = lead + server.BOT_DELAY["settle"] + server.SETTLE_SHOW_BUFFER
+    need = server.BOT_DELAY["settle"] + server.SETTLE_SHOW_BUFFER
     assert took >= need - 0.05, "电脑确认太早：lead=%.1f took=%.2f need=%.2f" % (lead, took, need)
-    print("[ok] lead=%.1f 确认耗时 %.2fs（至少 %.2fs）" % (lead, took, need))
+    print("[ok] lead=%.1f 弹窗确认后 %.2fs（至少 %.2fs）" % (lead, took, need))
+
+assert server.BOT_DELAY["roll"] >= 2.0, "电脑交接间隔必须至少 2 秒"
+print("[ok] 电脑到电脑的掷骰间隔 %.1fs" % server.BOT_DELAY["roll"])
+
+
+def one_chance(lead: float) -> float:
+    g = server.Game()
+    g.db_ok = False
+    g.add_bot()
+    g.add_bot()
+    g.start()
+    p = g.player(g.current)
+    g.phase = "chance"
+    g.chance = {"pid": p["id"], "name": p["name"], "text": "测试机会卡", "delta": 10,
+                "icon": "spark"}
+    g.settle_lead = lead
+    g.bump()
+    time.sleep(0.08)
+    acked = time.time()
+    g.chance_seen("test-client")
+    while g.chance is not None and time.time() - acked < 12:
+        time.sleep(0.05)
+    took = time.time() - acked
+    if g.bot_timer:
+        g.bot_timer.cancel()
+    return took
+
+
+for lead in (0.0, 3.0):
+    took = one_chance(lead)
+    need = server.BOT_DELAY["chance"] + server.SETTLE_SHOW_BUFFER
+    assert took >= need - 0.05, "电脑确认机会卡太早：lead=%.1f took=%.2f need=%.2f" % (lead, took, need)
+    print("[ok] 机会卡 lead=%.1f 弹窗确认后 %.2fs" % (lead, took))
 
 print("SETTLE TIMING PASS")

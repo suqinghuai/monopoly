@@ -1890,10 +1890,11 @@
     });
 
     // 机会卡：卡片要一直停在棋盘中央（所有玩家都看得到），等抽到的人点「确定」
+    // 同结算窗，定时器必须赶在帧队列切下一帧之前触发，否则会被下一帧吞掉。
     if (st.phase === 'chance' && st.chance) {
       setTimeout(function () {
         if (S.state && S.state.phase === 'chance' && S.state.chance) showChanceHold(S.state);
-      }, dur ? dur + 40 : 220);
+      }, dur > 100 ? Math.max(0, dur - 90) : 120);
     } else {
       hideChanceHold();
     }
@@ -1943,6 +1944,11 @@
     $id('settleWait').hidden = mine;
     if (!mine) $id('settleWait').textContent = '等待 ' + pname + ' 点「确定」…';
     mask.hidden = false;
+    // 告诉服务端「窗已经真的画出来了」：电脑从这个时刻起再等 2 秒才自动确定
+    if (S.token) {
+      api('/api/action?token=' + encodeURIComponent(S.token), { action: 'settle_seen' })
+        .catch(function () { /* 回报失败不影响玩家自己点确定 */ });
+    }
   }
   function hideSettleModal() {
     var mask = $id('settleMask');
@@ -2613,6 +2619,10 @@
         : '<div class="pc-wait">等 ' + esc(card.name || nameOf(st, card.pid)) + ' 点「确定」…</div>');
     layer.appendChild(el);
     CHANCE_HOLD = el;
+    if (S.token) {
+      api('/api/action?token=' + encodeURIComponent(S.token), { action: 'chance_seen' })
+        .catch(function () { /* 回报失败不影响玩家自己点确定 */ });
+    }
     if (mine) {
       var btn = el.querySelector('#btnChanceOk');
       if (btn) btn.onclick = function () {
