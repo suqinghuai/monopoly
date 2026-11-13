@@ -1899,11 +1899,12 @@
     }
 
     // 落地结算确认窗：租金 / 工资 / 税费 / 奖金，等落点玩家点「确定」才动钱
-    // 动画先播完（骰子 + 走过去），再弹窗，避免和移动抢视线
+    // 动画先播完（骰子 + 走过去），再弹窗；定时器要赶在帧队列切下一帧之前触发，
+    // 否则「下一帧」会先把 state 换掉，弹窗被判成过期，所有人就看不到窗。
     if (st.phase === 'settle' && st.settle) {
       setTimeout(function () {
-        if (S.state === st && S.state.phase === 'settle' && S.state.settle) showSettleModal(S.state);
-      }, dur ? dur + 60 : 120);
+        if (S.state && S.state.phase === 'settle' && S.state.settle) showSettleModal(S.state);
+      }, dur > 100 ? Math.max(0, dur - 90) : 120);
     } else {
       hideSettleModal();
     }
