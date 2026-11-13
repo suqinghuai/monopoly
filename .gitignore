@@ -1,0 +1,29 @@
+# 运行数据（本机私有，绝不入库）
+monopoly.db
+monopoly.db-shm
+monopoly.db-wal
+ai_config.json
+ai_fail.log
+
+# 日志
+*.log
+server_out.log
+server_err.log
+tests/mock_requests.jsonl
+
+# 打包产物（通过 GitHub Release 发布，不进源码库）
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
