@@ -107,4 +107,59 @@ for lead in (0.0, 3.0):
     assert took >= need - 0.05, "电脑买地/升级决定太早：lead=%.1f took=%.2f need=%.2f" % (lead, took, need)
     print("[ok] 地契卡 lead=%.1f 显示后 %.2fs 才决定" % (lead, took))
 
+
+def handoff(ack: bool) -> float:
+    g = server.Game()
+    g.db_ok = False
+    g.add_bot()
+    g.add_bot()
+    g.start()
+    g._advance_turn()
+    g.bump()
+    assert g.phase == "handoff", g.phase
+    t0 = time.time()
+    if ack:
+        g.handoff_seen("test-client")
+    while g.phase == "handoff" and time.time() - t0 < 3:
+        time.sleep(0.02)
+    took = time.time() - t0
+    assert g.phase != "handoff", "交接后没有离开交接阶段"
+    if g.bot_timer:
+        g.bot_timer.cancel()
+    return took
+
+
+for ack in (True, False):
+    took = handoff(ack)
+    if ack:
+        assert 1.9 < took < 2.3, "收到交接回报后没有停满 2 秒：%.2fs" % took
+    else:
+        assert took < 1.0, "没收到交接回报时兜底太慢：%.2fs" % took
+    print("[ok] 回合交接 ack=%s 后 %.2fs 进入下一家掷骰（旧弹窗已清空）" % (ack, took))
+
+
+def handoff_to_dice() -> float:
+    g = server.Game()
+    g.db_ok = False
+    g.add_bot()
+    g.add_bot()
+    g.start()
+    g._advance_turn()
+    g.bump()
+    t0 = time.time()
+    g.handoff_seen("test-client")
+    while time.time() - t0 < 8:
+        if any(n.get("type") == "dice" for n in (g.news_pub or [])):
+            break
+        time.sleep(0.02)
+    took = time.time() - t0
+    if g.bot_timer:
+        g.bot_timer.cancel()
+    return took
+
+
+took = handoff_to_dice()
+assert took >= server.BOT_DELAY["roll"] - 0.05, "电脑交接后掷骰太快：%.2fs" % took
+print("[ok] 清空弹窗后到下一家电脑掷骰 %.2fs（至少 %.1fs）" % (took, server.BOT_DELAY["roll"]))
+
 print("SETTLE TIMING PASS")

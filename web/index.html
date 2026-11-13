@@ -1831,12 +1831,15 @@
     S.prev = JSON.parse(JSON.stringify(st));
     S.state = st;
     S.chars = st.chars;
+    HANDOFF_MODE = st.phase === 'handoff';
     applyTurnTint(st);        // 轮到谁，整页色调就缓变成谁的颜色
 
     collectLogs(st);          // 新日志先进队列，等这一帧的动画播完再显示
     renderBoard(st);
     renderPanel(st);
     renderOver(st);
+
+
 
     if (!moves.length || S.animating) {
       st.players.forEach(function (p) { S.animPos[p.id] = p.pos; });
@@ -1860,6 +1863,10 @@
 
     if (!S.booted) {
       S.booted = true;
+      if (events.length) S.lastNews = events[events.length - 1].seq;
+      events = [];
+    } else if (st.phase === 'handoff') {
+      // 交接帧只负责清场，不再补播上一回合的卡片，否则清完又被弹出来
       if (events.length) S.lastNews = events[events.length - 1].seq;
       events = [];
     } else {
@@ -1914,6 +1921,16 @@
     setTimeout(function () {
       if (S.state === st) applyDeedCard(st);
     }, dur ? dur + 30 : 0);
+
+    // 回合交接放在这一帧所有事件 / 卡片定时器都处理完之后再清场，
+    // 避免上一回合最后一张卡在清空之后又被重新弹出来。
+    if (st.phase === 'handoff') {
+      clearTurnPopups();
+      if (S.token) {
+        api('/api/action?token=' + encodeURIComponent(S.token), { action: 'handoff_seen' })
+          .catch(function () { /* 回报失败时服务端有短兜底 */ });
+      }
+    }
     return dur;
   }
 
@@ -1963,6 +1980,7 @@
   // ---------------------------------------------------------- 集齐整组恭喜
   var groupTimer = null;
   function showGroupBanner(n, st) {
+    if (HANDOFF_MODE) return;
     var b = $id('groupBanner');
     if (!b) return;
     var p = null;
@@ -2575,7 +2593,9 @@
   }
 
   var POP_CLEAR = null;
+  var HANDOFF_MODE = false;
   function pushPop(html, hold, cls) {
+    if (HANDOFF_MODE) return;
     var layer = $id('popLayer');
     if (POP_CLEAR) clearTimeout(POP_CLEAR);
     layer.innerHTML = '';
@@ -2846,6 +2866,27 @@
           .catch(function () { /* 回报失败不影响玩家自己操作 */ });
       }
     });
+  }
+
+  // 回合交接：清掉上一家留下的所有确认窗 / 卡片 / 骰子浮层，再让下一家开始
+  function clearTurnPopups() {
+    hideChanceHold();
+    hideSettleModal();
+    hideDiceFocus(true);
+    if (POP_CLEAR) { clearTimeout(POP_CLEAR); POP_CLEAR = null; }
+    var layer = $id('popLayer');
+    if (layer) layer.innerHTML = '';
+    var deed = $id('deedCard');
+    if (deed) {
+      deed.classList.remove('on');
+      deed.classList.add('away');
+      deedKey = '';
+      clearTimeout(deedHideTimer);
+    }
+    var gb = $id('groupBanner');
+    if (gb) { gb.classList.remove('on'); clearTimeout(groupTimer); }
+    var tm = $id('tradeMask');
+    if (tm) tm.hidden = true;
   }
 
   // ---------------------------------------------------------- 面板

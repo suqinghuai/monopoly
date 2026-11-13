@@ -70,6 +70,8 @@ BOT_NAMES = ["铁算盘", "阿呆", "小机灵", "财迷", "守财奴", "赌徒"
 BOT_DELAY = {"roll": 2.0, "buy": 2.0, "settle": 2.0, "chance": 2.0}   # 结算/机会卡/买地升级：弹窗出现后停留 2 秒再「点确定」
 SETTLE_SHOW_BUFFER = 0.2   # SSE / 弹窗渲染的余量，保证「确定」时弹窗已完整显示 2 秒
 POPUP_FALLBACK_EXTRA = 2.5 # 没有客户端回「弹窗已显示」时的兜底余量
+HANDOFF_FALLBACK = 0.5     # 回合交接：没有客户端回「旧弹窗已清空」时的兜底
+HANDOFF_HOLD = 2.0         # 清空弹窗后，下一家至少等 2 秒才能掷骰 / 操作
 BOT_MOVE_LEAD = 1.1       # 骰子动画 + 落地停留
 BOT_STEP_ANIM = 0.17      # 棋子每格的动画时长
 SETTLE_ANIM_BASE = 2.6    # 骰子动画
@@ -634,6 +636,9 @@ class Game:
         self.settle_viewed = False           # 是否有客户端已经真正把结算窗显示出来
         self.chance_viewed = False           # 同上，机会卡
         self.buy_viewed = False              # 同上，买地 / 原地升级的地契卡
+        self.handoff_viewed = False           # 下一家是否回报「旧弹窗 / 动画已清空」
+        self.handoff_ack = False              # 这一次交接是否真的收到页面回报
+        self.skip_roll_delay = False          # 交接已等满 2 秒，电脑掷骰不再重复等待
         self.land: dict | None = None        # 结算完之后要落的点（买地 / 升级 / 机会）
         self.log: list[dict] = []
         self.log_seq = 0
@@ -727,6 +732,9 @@ class Game:
             self.settle_viewed = False
             self.chance_viewed = False
             self.buy_viewed = False
+            self.handoff_viewed = False
+            self.handoff_ack = False
+            self.skip_roll_delay = False
             self.land = snap.get("land")
             if self.phase == "action":       # 旧存档没有「结算」这个概念，落到行动阶段就直接交棒
                 self.phase = "roll"
@@ -1247,6 +1255,32 @@ class Game:
             self._arm_bot_popup_confirm("buy")
             self.lock.notify_all()
 
+    def handoff_seen(self, token: str) -> None:
+        """下一家的页面已经把上一回合的弹窗 / 动画清空。"""
+        with self.lock:
+            if self.phase != "handoff" or self.handoff_viewed:
+                return
+            self.handoff_viewed = True
+            self.handoff_ack = True
+            if self.bot_timer is not None:
+                self.bot_timer.cancel()
+                self.bot_timer = None
+            # 页面已经清空旧弹窗，从这里开始固定等 2 秒再轮到下一家掷骰 / 操作
+            self._arm(self._finish_handoff, HANDOFF_HOLD, self.version, self.current)
+
+    def _finish_handoff(self, version: int, current: int) -> None:
+        """交接完成：进入下一家的掷骰阶段。
+
+        收到页面回报时，交接阶段本身已经固定停满 HANDOFF_HOLD（2 秒），所以电脑
+        不再额外等 BOT_DELAY["roll"]；没有页面时走短兜底，电脑仍按 2 秒掷骰。
+        """
+        with self.lock:
+            if self.phase != "handoff" or version != self.version or current != self.current:
+                return
+            self.phase = "roll"
+            self.skip_roll_delay = bool(self.handoff_ack)
+            self.bump()
+
     def _arm_bot_popup_confirm(self, phase: str) -> None:
         """弹窗已显示：把兜底计时换成精确的「再等 2 秒」。调用方持锁。"""
         cur = self.player(self.current) if self.current is not None else None
@@ -1546,7 +1580,7 @@ class Game:
             if nxt["alive"]:
                 self.current = nxt["id"]
                 break
-        self.phase = "roll"
+        self.phase = "handoff"
         self.pending = None
         self.chance = None
         self.settles = []
@@ -1556,6 +1590,9 @@ class Game:
         self.settle_viewed = False
         self.chance_viewed = False
         self.buy_viewed = False
+        self.handoff_viewed = False
+        self.handoff_ack = False
+        self.skip_roll_delay = False
         self.turn_no += 1
         for x in self.players:
             x.pop("ai_plan", None)          # 上一回合的计划作废，别被下一次存档带进新回合
@@ -1579,6 +1616,10 @@ class Game:
             self.bot_timer = None
         if self.phase in ("lobby", "setup", "over"):
             return
+        if self.phase == "handoff":
+            # 先等前端把上一回合的弹窗 / 动画清空；没有页面回报时用短兜底
+            self._arm(self._finish_handoff, HANDOFF_FALLBACK, self.version, self.current)
+            return
         # 交易不跟着回合走，先处理
         for tr in self.trades:
             if tr.get("asked"):
@@ -1598,6 +1639,10 @@ class Game:
         if self.phase not in ("roll", "settle", "buy", "chance"):
             return
         delay = BOT_DELAY.get(self.phase, 1.0)
+        if self.phase == "roll" and self.skip_roll_delay:
+            # 交接阶段（含页面清场后的 2 秒）已经等过，电脑直接掷骰
+            self.skip_roll_delay = False
+            delay = 0.0
         if self.phase == "settle":
             # 等前端把骰子 + 走格动画播完、结算窗真正出现，再停留 2 秒；
             # 有客户端回报「弹窗已显示」时只等 2 秒，没回报时多留兜底时间。
@@ -2603,6 +2648,9 @@ class Game:
             return
         if action == "buy_seen":
             self.buy_seen(token)
+            return
+        if action == "handoff_seen":
+            self.handoff_seen(token)
             return
         if pid is None:
             raise ValueError("观战者不能操作棋盘")

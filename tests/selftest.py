@@ -5,6 +5,7 @@
 """
 
 import sys
+import time
 import urllib.error
 import urllib.request
 import json
@@ -104,6 +105,9 @@ def main():
         elif st["phase"] == "chance":
             assert st.get("chance") and st["chance"].get("text"), "chance 阶段应该有卡"
             call("/api/action", {"action": "chance_ok"}, token=tok)
+        elif st["phase"] == "handoff":
+            # 交接阶段只等 0.5 秒兜底，随后自动进入下一家的 roll
+            time.sleep(0.6)
         else:
             raise AssertionError("未知阶段 %s" % st["phase"])
 
@@ -137,6 +141,8 @@ def main():
             call("/api/action", {"action": "chance_ok"}, token=tok)
         elif st["phase"] == "buy":
             call("/api/action", {"action": "pass"}, token=tok)
+        elif st["phase"] == "handoff":
+            time.sleep(0.6)
     st = call("/api/state", token=a["token"])
     board = st["board"]
     mine = [t for t in board if t["owner"] == a["pid"]]
@@ -204,7 +210,7 @@ def main():
 
     call("/api/action", {"action": "resume"}, token=a["token"])
     st = call("/api/state", token=a["token"])
-    assert st["phase"] in ("roll", "buy", "settle", "chance", "over"), st["phase"]
+    assert st["phase"] in ("roll", "buy", "settle", "chance", "handoff", "over"), st["phase"]
     assert [p["pos"] for p in st["players"]] == pos_before, "继续后位置应原样保留"
     assert [p["money"] for p in st["players"]] == money_before, "继续后金币应原样保留"
     print("[ok] 继续成功，局面原样回来（阶段=%s）" % st["phase"])
