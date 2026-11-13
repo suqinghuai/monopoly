@@ -1831,8 +1831,15 @@
     S.prev = JSON.parse(JSON.stringify(st));
     S.state = st;
     S.chars = st.chars;
-    HANDOFF_MODE = st.phase === 'handoff';
     applyTurnTint(st);        // 轮到谁，整页色调就缓变成谁的颜色
+
+    var isHandoff = st.phase === 'handoff';
+    // 上一帧交接留下的最后一张卡（比如「买下了」）先清掉，再播这一帧的新卡
+    if (S.handoffPopPending) {
+      clearTurnPopups();
+      S.handoffPopPending = false;
+    }
+    if (isHandoff) clearTurnPopups();
 
     collectLogs(st);          // 新日志先进队列，等这一帧的动画播完再显示
     renderBoard(st);
@@ -1863,10 +1870,6 @@
 
     if (!S.booted) {
       S.booted = true;
-      if (events.length) S.lastNews = events[events.length - 1].seq;
-      events = [];
-    } else if (st.phase === 'handoff') {
-      // 交接帧只负责清场，不再补播上一回合的卡片，否则清完又被弹出来
       if (events.length) S.lastNews = events[events.length - 1].seq;
       events = [];
     } else {
@@ -1922,10 +1925,14 @@
       if (S.state === st) applyDeedCard(st);
     }, dur ? dur + 30 : 0);
 
-    // 回合交接放在这一帧所有事件 / 卡片定时器都处理完之后再清场，
-    // 避免上一回合最后一张卡在清空之后又被重新弹出来。
-    if (st.phase === 'handoff') {
-      clearTurnPopups();
+    // 交接帧：先清掉上一家残留，再播这一帧新产生的最后一张卡（例如「买下了」）。
+    // 如果这一帧有新卡，就让它停到下一帧开始再清；没有新卡则立即清场。
+    if (isHandoff) {
+      if (events.length) {
+        S.handoffPopPending = true;
+      } else {
+        clearTurnPopups();
+      }
       if (S.token) {
         api('/api/action?token=' + encodeURIComponent(S.token), { action: 'handoff_seen' })
           .catch(function () { /* 回报失败时服务端有短兜底 */ });
@@ -1980,7 +1987,6 @@
   // ---------------------------------------------------------- 集齐整组恭喜
   var groupTimer = null;
   function showGroupBanner(n, st) {
-    if (HANDOFF_MODE) return;
     var b = $id('groupBanner');
     if (!b) return;
     var p = null;
@@ -2593,9 +2599,7 @@
   }
 
   var POP_CLEAR = null;
-  var HANDOFF_MODE = false;
   function pushPop(html, hold, cls) {
-    if (HANDOFF_MODE) return;
     var layer = $id('popLayer');
     if (POP_CLEAR) clearTimeout(POP_CLEAR);
     layer.innerHTML = '';
