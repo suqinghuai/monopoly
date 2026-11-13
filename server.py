@@ -70,6 +70,12 @@ BOT_NAMES = ["铁算盘", "阿呆", "小机灵", "财迷", "守财奴", "赌徒"
 BOT_DELAY = {"roll": 1.15, "buy": 1.6, "settle": 2.0, "chance": 2.0}   # 结算弹窗：停留 2 秒再「点确定」
 BOT_MOVE_LEAD = 1.1       # 骰子动画 + 落地停留
 BOT_STEP_ANIM = 0.17      # 棋子每格的动画时长
+# 结算窗前端的展示时序：骰子 2.6s + 每格 0.172s + 收尾 0.16s，弹窗才出现。
+# 电脑必须在这之后再等 2 秒才自动点「确定」，否则弹窗还没出现，回合已经过去了。
+SETTLE_ANIM_BASE = 2.6
+SETTLE_STEP_ANIM = 0.172
+SETTLE_ANIM_TAIL = 0.16
+SETTLE_SHOW_BUFFER = 0.2   # SSE / 弹窗渲染的余量，保证「确定」时弹窗已完整显示 2 秒
 
 # ---------------------------------------------------------------- AI 玩家（方案 A）
 # 电脑有两种大脑：local（本地启发式）与 ai（走 OpenAI 兼容接口）。AI 只负责「提建议」，
@@ -625,6 +631,7 @@ class Game:
         self.pending: int | None = None
         self.chance: dict | None = None      # 待确认的机会卡（玩家点「确定」后才生效）
         self.settles: list[dict] = []        # 待确认的结算事件（租金 / 工资 / 税费…），确认后才动钱
+        self.settle_lead = 0.0               # 本回合结算窗出现前还要播多久动画（电脑自动确认用）
         self.land: dict | None = None        # 结算完之后要落的点（买地 / 升级 / 机会）
         self.log: list[dict] = []
         self.log_seq = 0
@@ -714,6 +721,7 @@ class Game:
             self.pending = snap.get("pending")
             self.chance = snap.get("chance")
             self.settles = snap.get("settles") or []
+            self.settle_lead = 0.0            # 载入后直接显示弹窗，不再补播移动
             self.land = snap.get("land")
             if self.phase == "action":       # 旧存档没有「结算」这个概念，落到行动阶段就直接交棒
                 self.phase = "roll"
@@ -1116,6 +1124,7 @@ class Game:
             self.dice = [random.randint(1, 6), random.randint(1, 6)]
             steps = sum(self.dice)
             self.last_steps = steps
+            self.settle_lead = SETTLE_ANIM_BASE + SETTLE_STEP_ANIM * steps + SETTLE_ANIM_TAIL
             self.say(f"{p['name']} 掷出 {self.dice[0]} + {self.dice[1]}，前进 {steps} 格", "dice", pid)
             self.event("dice", pid=pid, dice=list(self.dice), steps=steps)
             self.settles = []
@@ -1220,6 +1229,7 @@ class Game:
                 self.bump()
                 return
             e = self.settles.pop(0)
+            self.settle_lead = 0.0          # 后续结算窗不再补播上一段移动动画
             kind = e["type"]
             if kind == "salary":
                 p["money"] += e["amount"]
@@ -1322,6 +1332,7 @@ class Game:
             p = self.player(pid)
             card = dict(self.chance)
             self.chance = None
+            self.settle_lead = 0.0          # 机会卡确认后直接进结算窗，不补播上一段掷骰移动
             self.settles = []
             self.land = None
             self.event("chance_go", pid=pid, text=card.get("text", ""), icon=card.get("icon", "spark"),
@@ -1494,6 +1505,7 @@ class Game:
         self.settles = []
         self.land = None
         self.last_steps = 0
+        self.settle_lead = 0.0
         self.turn_no += 1
         for x in self.players:
             x.pop("ai_plan", None)          # 上一回合的计划作废，别被下一次存档带进新回合
@@ -1536,8 +1548,11 @@ class Game:
         if self.phase not in ("roll", "settle", "buy", "chance"):
             return
         delay = BOT_DELAY.get(self.phase, 1.0)
+        if self.phase == "settle":
+            # 等前端把骰子 + 走格动画播完、结算窗真正出现，再停留 2 秒
+            delay = BOT_DELAY["settle"] + SETTLE_SHOW_BUFFER + max(0.0, self.settle_lead)
         # 掷完骰子的那一帧要先把「骰子 + 逐格移动」播完，再让它做买地 / 升级的决定
-        if self.phase in ("buy", "settle") and self.last_steps:
+        elif self.phase == "buy" and self.last_steps:
             delay = max(delay, BOT_MOVE_LEAD + BOT_STEP_ANIM * min(self.last_steps, 12))
         if self.phase == "buy" and cur.get("brain") == "ai" and ai_brain.ok:
             delay += 0.4               # AI 要多等一小会儿，前端才来得及显示「正在思考」

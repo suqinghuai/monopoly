@@ -9,6 +9,12 @@
   覆盖加入/角色占用、开局权限、掷骰与结算确认、买地/升级、交换、暂停继续、观战、重开、
   等待室设置、电脑入桌、存档载入与认领。要求服务端使用空库，否则存档段会被已有对局干扰。
 
+- `test_settle_timing.py`：不启服务端，直接验证电脑的结算确认发生在
+  「移动动画播完 + 弹窗显示 2 秒」之后，防止弹窗还没出现电脑就自动点确定。
+  ```powershell
+  python tests/test_settle_timing.py
+  ```
+
 - `mock_openai.py`：本地假的 OpenAI 兼容端点，用来调试 AI 座位，不消耗真实额度。
   ```powershell
   python tests/mock_openai.py 9109 normal
