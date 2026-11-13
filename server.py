@@ -1271,14 +1271,14 @@ class Game:
     def _finish_handoff(self, version: int, current: int) -> None:
         """交接完成：进入下一家的掷骰阶段。
 
-        收到页面回报时，交接阶段本身已经固定停满 HANDOFF_HOLD（2 秒），所以电脑
-        不再额外等 BOT_DELAY["roll"]；没有页面时走短兜底，电脑仍按 2 秒掷骰。
+        交接阶段先固定停满 HANDOFF_HOLD（2 秒）清场；进入 roll 后电脑再等
+        BOT_DELAY["roll"]（2 秒）才掷骰，节奏不会太赶。
         """
         with self.lock:
             if self.phase != "handoff" or version != self.version or current != self.current:
                 return
             self.phase = "roll"
-            self.skip_roll_delay = bool(self.handoff_ack)
+            self.skip_roll_delay = False
             self.bump()
 
     def _arm_bot_popup_confirm(self, phase: str) -> None:
@@ -1639,10 +1639,6 @@ class Game:
         if self.phase not in ("roll", "settle", "buy", "chance"):
             return
         delay = BOT_DELAY.get(self.phase, 1.0)
-        if self.phase == "roll" and self.skip_roll_delay:
-            # 交接阶段（含页面清场后的 2 秒）已经等过，电脑直接掷骰
-            self.skip_roll_delay = False
-            delay = 0.0
         if self.phase == "settle":
             # 等前端把骰子 + 走格动画播完、结算窗真正出现，再停留 2 秒；
             # 有客户端回报「弹窗已显示」时只等 2 秒，没回报时多留兜底时间。

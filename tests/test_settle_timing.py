@@ -159,7 +159,9 @@ def handoff_to_dice() -> float:
 
 
 took = handoff_to_dice()
-assert took >= server.BOT_DELAY["roll"] - 0.05, "电脑交接后掷骰太快：%.2fs" % took
-print("[ok] 清空弹窗后到下一家电脑掷骰 %.2fs（至少 %.1fs）" % (took, server.BOT_DELAY["roll"]))
+need = server.HANDOFF_HOLD + server.BOT_DELAY["roll"]
+assert took >= need - 0.05, "电脑交接后掷骰太快：%.2fs" % took
+print("[ok] 清空弹窗 + 交接 %.1fs 后，电脑再等 %.1fs 才掷骰，共 %.2fs"
+      % (server.HANDOFF_HOLD, server.BOT_DELAY["roll"], took))
 
 print("SETTLE TIMING PASS")
