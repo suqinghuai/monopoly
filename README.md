@@ -1,15 +1,24 @@
-# 大富翁 · 局域网联机
+# 大富翁 · 联机（局域网 / 互联网 二合一）
 
 ## 1. 软件介绍
 
-一个家里能开局的网页版大富翁：电脑上跑一个 Python 小服务，同一个 WiFi 下的电脑、平板、手机打开网页地址就能进同一局，
+一个电脑上能开局的网页版大富翁：电脑上跑一个 Python 小服务，同一 WiFi 下的电脑、平板、手机打开网页地址就能进同一局，
 2 到 4 人，进场先选角色（小狐 / 小熊 / 企鹅 / 恐龙），每人有自己的头像和头像色。
 不需要联网、不需要第三方包，一个脚本起服务，一个 HTML 就是全部界面；对局历史会自动存进同级目录的 `monopoly.db`（Python 自带 SQLite），
 下次打开可以开新局，也可以从存档里接着打。
 
-**不想装 Python**：直接双击 `dist\大富翁.exe`。它会启动服务并自动打开浏览器（默认 `http://127.0.0.1:9000/`），
-存档 `monopoly.db`、AI 配置 `ai_config.json`、失败日志 `ai_fail.log` 都写在 exe 同目录；
-控制台窗口就是服务进程，关掉即停止。`大富翁.exe -p 9010 --no-browser` 可换端口或不自动开浏览器。
+**同一份程序、两种模式**：启动时先选
+
+- **局域网模式**：不碰公网，同一 WiFi 下的设备打开 `http://<本机IP>:9000/` 就能进；
+- **互联网模式**：再起一条 serveo 固定隧道，地址固定为 `https://suqinghuai.serveousercontent.com`，外地朋友也能进
+  （serveo 建不起来时自动退回 Cloudflare Quick Tunnel，地址每次随机）。
+
+**不想装 Python**：直接双击 `dist\大富翁.exe`，它会先让你选模式，然后起服务 + 按需建隧道，
+打印地址（互联网模式同时复制到剪贴板）并自动打开浏览器。
+存档 `monopoly.db`、AI 配置 `ai_config.json`、失败日志 `ai_fail.log`、隧道日志写在 **exe 同目录**；
+控制台窗口就是服务进程，关掉即停止。
+
+局域网版与联网版共用同一份 `src\server.py` 和同一套页面源码，区别只在实时通道（SSE / WebSocket）与是否走公网隧道。
 
 能力：
 
@@ -27,6 +36,8 @@
   所有玩家都能看到；落点玩家直接在地契卡上点「买下」或「升级 / 放弃」，别人看到的是「等 XX 决定…」
   （新买的地块显示「下次走到才能升」，钱不够时按钮变灰并写清差多少）
 - 等待室由房主设置：初始资金（1000 / 1500 / 2000 / 3000 或手输 600–6000）、加几台电脑、电脑难度（平衡 / 稳健 / 激进）
+- **对局聊天**：日志框底部有一条输入栏，发出去的一句话直接进对局记录（绿底 `kind=chat`），在场所有人都能在日志里看到；
+  棋盘每帧重绘而输入栏只建一次，打字打到一半不会被刷掉（局域网版和联网版共用同一份页面，两边都有）
 - **电脑玩家**（服务端托管），可以在等待室一台台加进来，难度可单独调；电脑会自己掷骰、买地、升级、交税，
   每做一个决定都会在记录里留一句理由（「买下就凑齐这组了，咬牙也要拿」「升级费要收 6 次租才回本」），
   人机只回答你的交换申请（接受 / 拒绝）、不会主动找你换地；4 台电脑可以自己开一局，真人全程观战
@@ -44,6 +55,8 @@
 - 玩家之间的地产交换**双方都能多选**（可以一次打包几块地，仍可贴现金差），对方接受 / 拒绝，电脑也会表态（AI 还会自己发起）；
   交换只能在自己回合、**掷骰之前**发起
 - 资产不够付租金即破产出局，最后活着的人获胜，房主可以「再来一局」
+- 房主还可以「结束房间」：把房间里其他人全部请出去（他们的登录态作废、需要重新加入，也可以换角色），
+  自己留在大厅，等于原地开一个新房间；和「再来一局」的区别是「再来一局」人还坐着、只重开牌桌
 - **集齐同色整组**：某一色的 3 块地都归同一个人时，全屏放一条「凑齐「麦金」整组，租金翻倍」横幅，
   这三块地的租金立刻 ×2，地图上的租金后面会标「（已翻倍）」
 - 棋盘中心一个正方形日志框，系统消息与各角色记录自动分色，**最新的在最上面、旧的往下沉**；
@@ -65,21 +78,25 @@
 
 ## 2. 使用说明（面向用户）
 
-**前置条件**：电脑上装有 Python 3.9 以上（标准库够用，不需要 pip 装任何东西）。
+**前置条件**：电脑上装有 Python 3.9 以上（标准库够用，不需要 pip 装任何东西）；用 exe 则什么都不用装。
 
 **启动**
 
 ```
-python server.py            # 默认 0.0.0.0:9000
-python server.py -p 9100    # 换端口
+双击 dist\大富翁.exe           # 先选 1=局域网 / 2=互联网
+python launcher.py            # 源码方式，同样先选模式（或 双击 启动.bat）
+python launcher.py --mode net # 跳过菜单：直接互联网模式
 ```
 
-窗口里会打印两个地址，例如：
+选完模式后窗口里会打印地址，例如局域网模式：
 
 ```
 本机打开 : http://127.0.0.1:9000/
-手机/其它电脑 : http://192.168.3.104:9000/
+同一 WiFi 下的手机/电脑 : http://192.168.3.104:9000/
 ```
+
+互联网模式会多打印一行固定地址 `https://suqinghuai.serveousercontent.com`（并复制到剪贴板）。
+serveo 偶尔会拒绝固定子名（上一次会话还没释放），等一分钟再开即可；`dist\cloudflared.exe` 存在时会自动退用它。
 
 **开局步骤**
 
@@ -132,7 +149,7 @@ python server.py -p 9100    # 换端口
 
 **接着上次的局打（存档）**
 
-1. 每次开局后，服务端会把当前局面自动写进和 `server.py` 同目录的 `monopoly.db`，一步一存，关掉服务端也不会丢。
+1. 每次开局后，服务端会把当前局面自动写进项目根目录的 `monopoly.db`（exe 版写在 exe 同目录），一步一存，关掉服务端也不会丢。
 2. 下次打开网页，入场页顶部有两个页签：「新游戏」和「载入存档 N」。点后者能看到历史局列表
    （标题、谁在局里、各自金币、更新时间、进行中 / 已结束）。
 3. 点「载入这局」，页面会进入「认领座位」：每行是你原来的角色、金币和地契数。
@@ -144,7 +161,7 @@ python server.py -p 9100    # 换端口
 | 现象 | 原因 / 处理 |
 | --- | --- |
 | 手机打不开 | 手机和电脑不在同一 WiFi；或电脑防火墙拦了 Python，允许一下入站即可 |
-| 端口被占用 | `python server.py -p 9010` 换个端口，所有人用新地址 |
+| 端口被占用 | `python src\server.py -p 9010` 换个端口，所有人用新地址 |
 | 名字/角色选了没反应 | 一个角色只能一个人用，换一个角色再试 |
 | 页面停在「等待开始」 | 房主还没点「开始游戏」，或房间里只有 1 个人 |
 | 中途有人关页面 | 座位会留在局里：重新打开页面会自动回到自己的座位；换设备就去「载入存档 → 认领座位」 |
@@ -159,7 +176,30 @@ python server.py -p 9100    # 换端口
 
 ## 3. 使用说明（面向开发者）
 
-**环境**：Python 3.9+，只用标准库（`http.server` / `threading` / `json` / `secrets` / `sqlite3`），没有 pyproject、没有依赖锁定。
+**环境**：Python 3.9+，运行时只用标准库（`http.server` / `threading` / `json` / `secrets` / `sqlite3` / `struct`）。
+包管理统一用 uv，虚拟环境固定在 `./.venv`：
+
+```
+uv sync                     # 建 ./.venv 并按 uv.lock 装 dev 工具链（ruff / black / pyinstaller）
+uv run python src\launcher.py --mode lan
+uv run ruff check src       # 规范要求：ruff 已开 T20（禁止裸 print）
+uv run black --check src
+```
+
+**一处源码，两种模式**：`src/launcher.py` 起服务（`src/server.py` 的 `Handler`）后按模式决定要不要建隧道；
+页面只有 `src/www/index.html` 一份，实时通道在页面里自己协商——先试 `/ws`（公网隧道不被缓冲），
+连不上自动退回 `/api/events`（SSE，安卓端内置服务只有这条）。所以改页面不用再同步第二份文件。
+
+**日志**：服务端和启动器的控制台输出统一走 `logging`（logger 名 `monopoly`，`%(message)s` 格式），
+业务代码里不要再写裸 `print`——ruff 的 `T20` 会直接报错。
+
+**打包电脑版**：
+
+```
+powershell -ExecutionPolicy Bypass -File src\tools\打包exe.ps1   # -> dist\大富翁.exe（约 10 MB）
+```
+
+**打包安卓版**：`Android\build.ps1`，构建时把 `src\www\index.html` 同步进 `assets\www\`（页面不另存第二份）。
 
 **跑接口自测**（服务端要先起着）：
 
@@ -172,7 +212,7 @@ python tests/selftest.py 9000
 观战不占座位，重开一局（等级清零、金币复位），等待室设置（起始资金与难度、越界被拒），电脑入桌与难度单独改，
 以及存档链路（`/api/saves` 有记录 → `/api/load` 载入后旧 token 失效 → `/api/claim` 认领座位 → 金币与地契一致、重复认领被拒）。
 自测会把当前这一局「载入」一遍，所以要在干净状态下跑：`monopoly.db` 里已有进行中的局、或房间里已经有人时，
-先 `python server.py` 重启一次并删掉 `monopoly.db*` 再测。
+先 `python src\launcher.py --mode lan` 重启一次并删掉 `monopoly.db*` 再测。
 
 AI 座位不接真模型也能调试：`tests/mock_openai.py` 是个假 OpenAI 端点
 （`python tests/mock_openai.py 9109 normal`，模式 `normal` / `badjson`（前 3 次回非 JSON）/
@@ -273,17 +313,28 @@ append 进去，`_local_step()` 先算理由 → `_bot_say()` 取第一条 `say(
 
 ```
 monopoly/
-├─ server.py              服务端（HTTP 文件服务 + JSON 接口 + SSE 广播 + SQLite 存档）
-├─ web/index.html         单文件前端（入场 / 载入存档 / 认领座位 / 等待室 / 棋盘 / 面板），内联 CSS 与 JS
-├─ assets/                图标（app_icon.png / app.ico）
+├─ src/                     业务源码（唯一源码根）
+│  ├─ server.py             服务端（游戏逻辑 + HTTP 接口 + SSE / WebSocket 两条实时通道 + SQLite 存档）
+│  ├─ launcher.py           统一启动器（选局域网 / 互联网），exe 和 启动.bat 都走它
+│  ├─ www/index.html        唯一前端（入场 / 载入存档 / 认领座位 / 等待室 / 棋盘 / 面板），内联 CSS 与 JS
+│  └─ tools/打包exe.ps1      PyInstaller onefile -> dist/大富翁.exe
+├─ 启动.bat                 源码方式启动（需要 Python），指向 src/launcher.py
+├─ pyproject.toml           项目声明：requires-python >= 3.9，运行时零第三方依赖，dev 组 ruff / black / pyinstaller
+├─ uv.lock                  依赖锁定（uv lock 生成）
+├─ doc/
+│  ├─ 开发文档.md           每次迭代的开发记录
+│  └─ 版本日志.md           由用户编辑
 ├─ tests/
-│  ├─ selftest.py          接口与流程自测（python tests/selftest.py 9000）
-│  └─ mock_openai.py       假的 OpenAI 兼容端点，用于 AI 全链路调试
-├─ doc/开发文档.md        每次迭代的开发记录
-├─ dist/                  本地打包产物（大富翁.exe / 使用说明.txt，不入库）
-├─ README.md              本文件
-├─ 开发规范.md            项目约定
-└─ .gitignore             忽略存档、配置密钥、日志和打包产物
+│  ├─ selftest.py           接口与流程自测（python tests/selftest.py 9000）
+│  ├─ channel_probe.py      实时通道自测：同一地址上 /ws 与 /api/events 都验一遍
+│  ├─ test_settle_timing.py 结算 / 交接节奏的单元测试
+│  └─ mock_openai.py        假的 OpenAI 兼容端点，用于 AI 全链路调试
+├─ Android/                 安卓版构建工程（页面由 syncWeb 从 ../src/www 同步）
+├─ assets/                  图标（app_icon.png / app.ico）
+├─ dist/                    本地产物（不入库）：大富翁.exe / 大富翁.spec / serveo_name.txt / cloudflared.exe
+├─ README.md                本文件
+├─ 开发规范.md              项目约定
+└─ .gitignore               忽略存档、配置密钥、日志、.venv 与打包产物
 ```
 
 运行时才会生成、且**不入库**的文件：`monopoly.db`（存档）、`ai_config.json`（开始页保存的 AI 接口配置）、
@@ -298,15 +349,16 @@ monopoly/
 
 | 地址 | 作用 |
 | --- | --- |
-| `GET /?token=…` | 返回 `web/index.html`（无 token 也返回同一个页面，由前端决定显示入场还是棋盘） |
+| `GET /?token=…` | 返回 `www/index.html`（无 token 也返回同一个页面，由前端决定显示入场还是棋盘） |
 | `GET /api/lobby` | 房间概况：玩家列表、角色占用、能不能开局 |
 | `POST /api/join` | 选角色 + 名字入场，返回 `token`（`secrets.token_hex(14)`） |
 | `POST /api/watch` | 只观战：返回 `token`，不占座位；`view` 里 `watching = true`、`you = null` |
 | `GET /api/state?token=…` | 当前玩家的完整视图：棋盘、玩家、自己的地契、交换申请、最近 40 条日志、最新事件 |
-| `POST /api/action?token=…` | 所有操作：玩家侧 `roll` / `settle_ok` / `chance_ok` / `buy` / `pass` / `upgrade` / `trade_offer` / `trade_answer`；房主侧 `start` / `restart` / `pause` / `resume` / `settings` / `bot_add` / `bot_remove` / `bot_level` |
+| `POST /api/action?token=…` | 所有操作：玩家侧 `roll` / `settle_ok` / `chance_ok` / `buy` / `pass` / `upgrade` / `trade_offer` / `trade_answer`；房主侧 `start` / `restart` / `close_room` / `pause` / `resume` / `settings` / `bot_add` / `bot_remove` / `bot_level` |
 | `POST /api/leave?token=…` | 退出房间（局中只有观战者能退，玩家退座会被拒，以免丢座位） |
 | `GET/POST /api/ai_config` | 开始页读取 / 保存 AI 接口配置（地址、模型、Key），保存即生效 |
-| `GET /api/events?token=…` | SSE 长连接，`version` 变化就推一帧新状态，页面因此不用轮询 |
+| `GET /api/events?token=…` | SSE 长连接，`version` 变化就推一帧新状态（局域网 / 安卓端内置服务走这条） |
+| `GET /ws?token=…` | WebSocket，同样的推帧逻辑。页面优先用它，因为公网隧道会缓冲 `text/event-stream`；连不上就自动退回 SSE |
 | `GET /api/saves` | 历史存档列表（`id / title / created_at / updated_at / status / phase / summary`）+ 当前正在用的 `game_id` |
 | `POST /api/load` | 载入指定存档，返回 `seats`（座位表：`id / name / char / money / alive / props / claimed`） |
 | `GET /api/seats` | 当前局面的座位认领状态，认领页轮询用 |
@@ -321,7 +373,7 @@ monopoly/
   一次状态变化里常有「掷骰 + 领工资 + 落地 + 抽卡」好几条，前端逐条播，`seq` 保证刷新 / 重连不重播。
 - 机会卡是字典列表，支持 `delta`（进出账）/ `move`（相对走格）/ `goto`（直接跳格），结算后递归 `_resolve`（深度上限 3，防止连环卡死循环）。
 - **权限收口在 token 上**：`self.host_token` 是唯一房主凭据，`is_admin(token)` 一处判定；
-  `act()` 用 `ADMIN_ACTIONS = {start, restart, pause, resume, settings, bot_add, bot_remove, bot_level}`
+  `act()` 用 `ADMIN_ACTIONS = {start, restart, close_room, pause, resume, settings, bot_add, bot_remove, bot_level}`
   统一在入口校验，所以「4 台电脑自己打、真人只观战」时房主照样能开局 / 暂停。载入存档后 `host_token = None`，
   第一个 `claim` 的人自动成为房主。
 - **暂停 = 快照移出 + 相位拨回**：`pause()` 把 `snapshot()`（`pop("frozen")` 去嵌套）存进 `self.frozen`、`phase = "setup"`，

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#EDF4F1">
-<title>大富翁 · 局域网</title>
+<title>大富翁 · 联机</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232FA98E'/%3E%3Crect x='6' y='6' width='8' height='8' rx='2' fill='%23fff'/%3E%3Crect x='18' y='6' width='8' height='8' rx='2' fill='%23fff' opacity='.55'/%3E%3Crect x='6' y='18' width='8' height='8' rx='2' fill='%23fff' opacity='.55'/%3E%3Crect x='18' y='18' width='8' height='8' rx='2' fill='%23fff'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -510,6 +510,29 @@
   }
   .log-head .cnt { font-size: 10px; color: #A6B5AE; }
 
+  /* 日志框底部：发消息 */
+  .log-say {
+    flex: none; display: flex; gap: 6px; align-items: center;
+    padding: 7px 9px 8px;
+    border-top: 1px solid #EDF4F0;
+    background: linear-gradient(180deg, #FBFEFC, #F5FAF7);
+  }
+  .log-say input {
+    flex: 1; min-width: 0;
+    font: inherit; font-size: 11.5px;
+    padding: 6px 10px; border-radius: 9px;
+    border: 1px solid #DFEBE5; background: #fff; color: var(--ink);
+    outline: none;
+  }
+  .log-say input:focus { border-color: #BFDCCE; box-shadow: 0 0 0 3px rgba(47,169,142,.12); }
+  .log-say input::placeholder { color: #B3C2BB; }
+  .log-say button {
+    flex: none; font: inherit; font-size: 11px; font-weight: 600;
+    padding: 6px 12px; border-radius: 9px; cursor: pointer;
+    border: 1px solid #CDE3D8; background: #EAF6F0; color: #22725E;
+  }
+  .log-say button:disabled { opacity: .5; cursor: default; }
+
   .log-list {
     flex: 1; min-height: 0;
     overflow-y: auto;
@@ -541,6 +564,13 @@
   /* AI 说的话：点变成小方块，和「人机/系统」的圆点区分开 */
   .lg.k-ai .lg-dot { border-radius: 2px; width: 5px; height: 5px; }
   .lg.k-ai .lg-t { opacity: .92; }
+  /* 玩家自己发的消息：淡底色块，和数据点区分开 */
+  .lg.k-chat {
+    background: rgba(47,169,142,.07);
+    border-radius: 6px;
+    padding: 3px 6px;
+  }
+  .lg.k-chat .lg-dot { border-radius: 2px; width: 5px; height: 5px; }
 
   .c-foot {
     flex: none; font-size: 10px; color: #9BAAA3;
@@ -1046,7 +1076,7 @@
 <!-- ===== 入场 ===== -->
 <section class="center-view" id="joinView">
   <div class="sheet">
-    <div class="sheet-title">大富翁 <span>·</span> 局域网联机</div>
+    <div class="sheet-title">大富翁 <span>·</span> 联机</div>
     <div class="sheet-sub">2 至 4 人，同一 WiFi 下打开这个地址就能进同一局</div>
 
     <div class="seg" id="entryTabs">
@@ -1141,6 +1171,7 @@
     <div class="join-row">
       <button class="primary" id="btnStart">开始游戏</button>
       <button class="ghost" id="btnLeaveRoom">退出房间</button>
+      <button class="ghost" id="btnCloseRoom">结束房间</button>
       <button class="ghost" id="btnRulesRoom">规则说明</button>
       <button class="ghost" id="btnAiCfgRoom">AI 接口</button>
     </div>
@@ -1192,6 +1223,7 @@
 
     <div class="admin-row bottom-row" id="adminRow">
       <button class="ghost" id="btnPause">返回开始页<b class="sub">保留局面</b></button>
+      <button class="ghost" id="btnCloseRoomGame">结束房间<b class="sub">回到大厅</b></button>
       <button class="ghost" id="btnRulesGame">规则说明</button>
     </div>
   </aside>
@@ -1324,7 +1356,7 @@
 
   var S = {
     token: null, state: null, chars: [], selected: null,
-    es: null, pollTimer: null, lobbyTimer: null,
+    ws: null, wsLast: 0, wsWatch: null, es: null, pollTimer: null, lobbyTimer: null,
     lastNews: 0, booted: false, saves: [], seats: [], seatTimer: null,
     tilePos: [], tk: 24, tokenEls: {}, animPos: {},
     animating: false, diceRunning: false, prev: null, rules: null
@@ -1709,6 +1741,8 @@
     S.token = null;
     localStorage.removeItem('monopoly.token');
     rememberTokenInUrl(null);
+    if (S.ws) { try { S.ws.close(); } catch (e) {} S.ws = null; }
+    clearInterval(S.wsWatch);
     if (S.es) { S.es.close(); S.es = null; }
     clearInterval(S.pollTimer);
     clearInterval(S.seatTimer);
@@ -1776,13 +1810,81 @@
     api('/api/state?token=' + encodeURIComponent(S.token)).then(function (data) {
       applyState(data);
     }).catch(function (err) {
-      if (String(err.message).indexOf('失效') >= 0) { clearToken(); }
-      else { toast('读取失败：' + err.message); }
+      if (String(err.message).indexOf('失效') >= 0) {
+        clearToken();
+        toast('房主结束了房间，重新加入一下');
+      } else { toast('读取失败：' + err.message); }
     });
   }
 
-  function startStream() {
+  // 实时通道：先用 WebSocket，连不上自动退回 SSE，再不行退回轮询。
+  // 为什么不是只用一种：公网隧道（serveo / Cloudflare）会把 text/event-stream 缓冲住，
+  // SSE 在那种链路上“已连接但永远没数据”；安卓端内置服务只实现了 SSE。
+  // 同一份页面两边都要能跑，所以按能力协商：WS 优先，握手失败或 8 秒没消息就降级。
+  var WS_TRY_MS = 3000;       // 等 WS 握手的时间，超时就先降级，别让画面干等
+  var WS_SILENT_MS = 8000;    // 已经连上但多久没消息算失效
+  var WS_RETRY_MS = 2500;     // 断线后多久再试 WS
+  var STREAM_RETRY_MS = 2500; // SSE 断线重连间隔
+
+  function stopStream() {
+    if (S.ws) { try { S.ws.close(); } catch (e) {} S.ws = null; }
+    clearInterval(S.wsWatch);
+    S.wsWatch = null;
     if (S.es) { S.es.close(); S.es = null; }
+  }
+
+  function startStream() {
+    stopStream();
+    if (!S.token) { return; }
+    if (window.WebSocket) startWS();
+    else startSSE();
+  }
+
+  function startWS() {
+    var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    var ws;
+    try { ws = new WebSocket(proto + location.host + '/ws?token=' + encodeURIComponent(S.token)); }
+    catch (err) { startSSE(); return; }
+
+    S.ws = ws;
+    S.wsLast = Date.now();
+    var opened = false;
+
+    // 握手迟迟不成功（服务端没有 /ws，或被中间设备卡住）：直接换 SSE
+    var tryTimer = setTimeout(function () {
+      if (!opened && S.ws === ws) { stopStream(); startSSE(); }
+    }, WS_TRY_MS);
+
+    S.wsWatch = setInterval(function () {
+      if (!S.token) { clearInterval(S.wsWatch); return; }
+      if (Date.now() - S.wsLast > WS_SILENT_MS) pollLoop();
+    }, 1000);
+
+    ws.onopen = function () {
+      opened = true;
+      clearTimeout(tryTimer);
+      S.wsLast = Date.now();
+      if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
+    };
+    ws.onmessage = function (e) {
+      S.wsLast = Date.now();
+      if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
+      try { applyState(JSON.parse(e.data)); } catch (err) { /* 忽略坏包 */ }
+    };
+    ws.onerror = function () { /* 交给 onclose 统一处理 */ };
+    ws.onclose = function () {
+      clearTimeout(tryTimer);
+      clearInterval(S.wsWatch);
+      if (S.ws === ws) S.ws = null;
+      if (!S.token) return;
+      if (!opened) { startSSE(); return; }   // 压根没连上：这条路不通，换 SSE
+      pollLoop();
+      setTimeout(function () { if (!S.ws && !S.es && S.token) startStream(); }, WS_RETRY_MS);
+    };
+  }
+
+  function startSSE() {
+    stopStream();
     if (!window.EventSource) { pollLoop(); return; }
     try {
       S.es = new EventSource('/api/events?token=' + encodeURIComponent(S.token));
@@ -1794,7 +1896,7 @@
         if (!S.es) return;
         S.es.close();
         S.es = null;
-        setTimeout(function () { if (!S.es && S.token) startStream(); }, 2500);
+        setTimeout(function () { if (!S.es && !S.ws && S.token) startStream(); }, STREAM_RETRY_MS);
         pollLoop();
       };
       setTimeout(function () {
@@ -2093,6 +2195,7 @@
     });
 
     board.appendChild(renderCenter(st));
+    mountSayBar();
     if (!S.diceRunning) {
       setDie($id('die1'), st.dice[0]);
       setDie($id('die2'), st.dice[1]);
@@ -2175,6 +2278,7 @@
       '<div class="log-zone"><div class="log-box">' +
         '<div class="log-head"><span class="tt">对局记录</span><span class="cnt">' + ((S.logShown || st.log || []).length) + ' 条</span></div>' +
         '<div class="log-list" id="logList">' + lines + '</div>' +
+        '<div id="logSayHost"></div>' +
       '</div></div>' +
       '<div class="c-foot"><span>点数即步数</span><span class="sep"></span>' +
         '<span>经过起点 +' + (st.salary != null ? st.salary : 500) + '</span></div>';
@@ -2233,6 +2337,7 @@
     return list.slice(-40).reverse().map(function (l, idx) {
       var col = lineColor(l, st);
       return '<div class="lg' + (l.kind === 'over' ? ' k-strong' : '') + (l.kind === 'ai' ? ' k-ai' : '') +
+        (l.kind === 'chat' ? ' k-chat' : '') +
         (idx < (freshCount || 0) ? ' newin' : '') + '" style="--c:' + col.c + '">' +
         '<span class="lg-dot" style="background:' + col.dot + '"></span>' +
         '<span class="lg-t">' + esc(l.text) + '</span></div>';
@@ -2244,6 +2349,56 @@
     if (!list) return;
     list.innerHTML = logLinesHTML(freshCount);
     keepLogScroll(list);
+  }
+
+  // ---------------------------------------------------------- 发消息
+  // 日志框每帧都会整块重建，输入框不能跟着重建（否则打一半的字会被抹掉）。
+  // 所以输入条只建一次，每次渲染后把它「搬」进新的位置，值和光标都还在。
+  var sayBar = null;
+
+  function buildSayBar() {
+    var bar = document.createElement('div');
+    bar.className = 'log-say';
+    var input = document.createElement('input');
+    input.id = 'sayInput';
+    input.type = 'text';
+    input.maxLength = 80;
+    input.placeholder = '说点什么，大家在对局记录里都能看到';
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); sendSay(); }
+    });
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '发送';
+    btn.addEventListener('click', sendSay);
+    bar.appendChild(input);
+    bar.appendChild(btn);
+    return bar;
+  }
+
+  function mountSayBar() {
+    var host = $id('logSayHost');
+    if (!host) return;
+    if (!sayBar) sayBar = buildSayBar();
+    if (sayBar.parentNode === host) return;
+    var input = sayBar.querySelector('#sayInput');
+    var hadFocus = document.activeElement === input;
+    var caret = hadFocus ? input.selectionStart : null;
+    host.appendChild(sayBar);
+    if (hadFocus) {
+      input.focus();
+      if (caret != null) { try { input.setSelectionRange(caret, caret); } catch (e) { /* 忽略 */ } }
+    }
+  }
+
+  function sendSay() {
+    if (!sayBar || !S.token) return;
+    var input = sayBar.querySelector('#sayInput');
+    var text = (input.value || '').trim();
+    if (!text) return;
+    input.value = '';
+    api('/api/chat?token=' + encodeURIComponent(S.token), { text: text })
+      .catch(function (err) { toast(err.message || '发送失败'); });
   }
 
   function keepLogScroll(logList) {
@@ -2971,9 +3126,11 @@
     $id('btnTrade').disabled = !(st.phase === 'roll' && myTurn) || outgoing || !p || !p.alive;
 
     var canPause = isHost && st.phase !== 'over';
-    // 这一行里还有「规则说明」，所以整行始终显示，只藏房主才有的「返回开始页」
+    // 这一行里还有「规则说明」，所以整行始终显示，只藏房主才有的「返回开始页」「结束房间」
     $id('btnPause').hidden = !canPause;
-    $id('adminRow').style.gridTemplateColumns = canPause ? '1fr 1fr' : '1fr';
+    $id('btnCloseRoomGame').hidden = !isHost;
+    var adminCols = 1 + (canPause ? 1 : 0) + (isHost ? 1 : 0);
+    $id('adminRow').style.gridTemplateColumns = new Array(adminCols).fill('1fr').join(' ');
 
     var mine = watching ? [] : st.board.filter(function (t) { return t.owner === st.you; });
     $id('deedCount').textContent = mine.length + ' 处';
@@ -3158,6 +3315,7 @@
 
     $id('shareUrl').textContent = location.origin + '/';
     $id('btnLeaveRoom').hidden = paused;
+    $id('btnCloseRoom').hidden = !isHost;
 
     var startBtn = $id('btnStart');
     startBtn.disabled = !isHost || (!paused && st.players.length < 2);
@@ -3205,6 +3363,14 @@
     act(st && st.phase === 'setup' ? 'resume' : 'start');
   });
   $id('btnRestart').addEventListener('click', function () { act('restart'); });
+
+  // 房主结束房间：把房间里其他人请出去（他们手上的登录态作废），自己留在大厅开新房间
+  function closeRoom() {
+    if (!confirm('结束这个房间，开一个新的？\n其他人会被请出房间，需要重新加入（也可以换角色）。')) return;
+    act('close_room');
+  }
+  $id('btnCloseRoom').addEventListener('click', closeRoom);
+  $id('btnCloseRoomGame').addEventListener('click', closeRoom);
   $id('btnPause').addEventListener('click', function () {
     if (!confirm('把这一局先冻结，回到开始页调设置？局面会原样保留。')) return;
     act('pause');
@@ -3486,7 +3652,7 @@
   // 手机息屏 / 切后台再回来、页面从缓存里恢复：补一次状态、必要时重开 SSE。
   function wakeUp() {
     if (!S.token) return;
-    if (!S.es || S.es.readyState !== 1) startStream();
+    if (!S.ws || S.ws.readyState !== 1) startStream();
     refreshState();
   }
   document.addEventListener('visibilitychange', function () {

@@ -14,12 +14,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
+import hashlib
 import json
+import logging
 import random
 import secrets
 import socket
 import sqlite3
+import struct
 import sys
 import threading
 import time
@@ -32,8 +36,27 @@ from urllib.parse import parse_qs, urlparse
 
 # PyInstaller 打包后：页面资源在解包目录 _MEIPASS，存档/配置/日志写在 exe 同目录
 FROZEN = bool(getattr(sys, "frozen", False))
-ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
-WEB = Path(getattr(sys, "_MEIPASS", ROOT)) / "web"
+SRC = Path(__file__).resolve().parent                     # src/
+ROOT = Path(sys.executable).resolve().parent if FROZEN else SRC.parent
+WEB = Path(getattr(sys, "_MEIPASS", SRC)) / "www"         # 页面只有一份：src/www/index.html
+
+# 日志统一走 logging（控制台格式保持原样，只有一条消息、不带时间戳前缀）
+LOG = logging.getLogger("monopoly")
+
+
+def setup_logging(level: int = logging.INFO) -> None:
+    if LOG.handlers:
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    LOG.addHandler(handler)
+    LOG.setLevel(level)
+    LOG.propagate = False
+
+
+def say(text: str = "") -> None:
+    """控制台播报：统一入口，内部走 logging。"""
+    LOG.info(text)
 
 START_MONEY = 1500
 SALARY = 500            # 经过起点
@@ -67,8 +90,11 @@ BOT_LEVELS = {
 TRADE_MIN_MARGIN = 120    # 再小的「便宜」也不接：差价不到这份钱就当没看见
 
 BOT_NAMES = ["铁算盘", "阿呆", "小机灵", "财迷", "守财奴", "赌徒", "老掌柜", "账房"]
-BOT_DELAY = {"roll": 2.0, "buy": 2.0, "settle": 2.0, "chance": 2.0}   # 结算/机会卡/买地升级：弹窗出现后停留 2 秒再「点确定」
+BOT_DELAY = {"roll": 2.0, "buy": 2.0, "settle": 2.0, "chance": 2.0}
+# 结算 / 机会卡 / 买地升级：弹窗出现后停留 2 秒再「点确定」
 SETTLE_SHOW_BUFFER = 0.2   # SSE / 弹窗渲染的余量，保证「确定」时弹窗已完整显示 2 秒
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_PING_EVERY = 15.0       # /ws 空闲多久发一次 ping，防中间设备掐断长连接
 POPUP_FALLBACK_EXTRA = 2.5 # 没有客户端回「弹窗已显示」时的兜底余量
 HANDOFF_FALLBACK = 0.5     # 回合交接：没有客户端回「旧弹窗已清空」时的兜底
 HANDOFF_HOLD = 2.0         # 清空弹窗后，下一家至少等 2 秒才能掷骰 / 操作
@@ -165,7 +191,7 @@ TILE_DEFS = [
 
 def rules_payload() -> dict:
     """规则说明（数值全部从常量里取，改规则不用改前端文案）。"""
-    pct = [int(round(l["rent"] * 100)) for l in LEVELS]
+    pct = [int(round(lv["rent"] * 100)) for lv in LEVELS]
     money_choices = " / ".join(str(x) for x in MONEY_CHOICES)
     bot_mood = {"normal": "看性价比，留点余钱",
                 "steady": "现金为王，只捡便宜",
@@ -227,17 +253,21 @@ def rules_payload() -> dict:
                 "地块 + 现金自由搭配；双方的每一侧都可以一次选多块地打包交换。",
                 "对方点「接受」才生效，拒绝就作废；同一时间只有一笔待回应的交换。",
                 "人机（本地算法）只会接受或拒绝，不会主动发起交换。",
-                "AI 座位有主动权：它会在落地后那一次计划里写好换地打算，到你下一回合开局（掷骰前）才真正发出去（一局最多几笔，被拒就作罢）。",
+                "AI 座位有主动权：它会在落地后那一次计划里写好换地打算，"
+                "到你下一回合开局（掷骰前）才真正发出去（一局最多几笔，被拒就作罢）。",
             ]},
             {"title": "电脑玩家", "items": [
                 "只能在等待室加电脑，开局后只能改难度，不能加人或删人。",
-                "电脑有两种：人机（本地算法，秒回）和 AI（真的调一个大模型来想）。房主在等待室点「＋人机」或「＋AI」自己挑。",
+                "电脑有两种：人机（本地算法，秒回）和 AI（真的调一个大模型来想）。"
+                "房主在等待室点「＋人机」或「＋AI」自己挑。",
                 "三档难度：%s。" % "、".join(
                     "%s（%s）" % (v["name"], bot_mood[k]) for k, v in BOT_LEVELS.items()),
                 "人机会按色组凑地、按手里的现金决定买不买；升级只升它正踩着的地，且用「收几次租回本」来算划不划算。",
                 "人机还看局势：现金比平均多就攥钱，明显落后就抢地，所以同一档难度也会打出不同的节奏。",
-                "电脑每做一个决定都会留一句理由（例如「买下就凑齐这组了，咬牙也要拿」「升级费要收 6 次租才回本，不划算」），在记录里能直接看到它怎么想的。",
-                "AI 玩家除了看规则和局势，还会带着自己写的「小本子」（记谁坑过它、盯上哪块地、下一步计划）和最近流水，所以打起来更连贯、也会记仇。",
+                "电脑每做一个决定都会留一句理由（例如「买下就凑齐这组了，咬牙也要拿」"
+                "「升级费要收 6 次租才回本，不划算」），在记录里能直接看到它怎么想的。",
+                "AI 玩家除了看规则和局势，还会带着自己写的「小本子」"
+                "（记谁坑过它、盯上哪块地、下一步计划）和最近流水，所以打起来更连贯、也会记仇。",
                 "AI 在落地之后才决定：踩到要买 / 要升的地时调一次模型，一次把这一回合剩下的打算排好；"
                 "AI 走到只收租、交税、领钱这种不需要选的地方就不调模型，自动确认。",
                 "AI 给的计划会先过一遍结构校验：不合法就打回去让它重来，三次还不行就换人机接手这一回合，对局不会卡住。",
@@ -701,7 +731,7 @@ class Game:
                          json.dumps(self.snapshot(), ensure_ascii=False))
         except Exception as exc:                        # 存档失败不影响继续玩
             if self.db_ok:
-                print("存档写入失败，已降级为纯内存模式：%s" % exc)
+                say("存档写入失败，已降级为纯内存模式：%s" % exc)
             self.db_ok = False
 
     def restore(self, snap: dict, game_id: int) -> None:
@@ -832,6 +862,25 @@ class Game:
         self.log_seq += 1
         self.log.append({"id": self.log_seq, "kind": kind, "pid": pid, "text": text})
         del self.log[:-80]
+
+    def chat(self, token: str, text: str) -> None:
+        """玩家在对局记录里发一条消息（观战者也能发）。"""
+        line = " ".join(str(text or "").split())
+        if not line:
+            raise ValueError("先说点什么再发")
+        if len(line) > 80:
+            line = line[:80] + "…"
+        with self.lock:
+            if not self.can_view(token):
+                raise ValueError("登录状态失效，重进一下房间")
+            pid = self.tokens.get(token)
+            name = "观战者"
+            if pid is not None:
+                p = self.player(pid)
+                if p:
+                    name = p["name"]
+            self.say(f"{name}：{line}", "chat", pid)
+            self.bump()
 
     def event(self, type_: str, **kw) -> None:
         """给前端播动画用的一次性事件（带自增 seq，客户端只播一次）。"""
@@ -1050,7 +1099,7 @@ class Game:
                                  "sys")
                 except Exception as exc:
                     self.db_ok = False
-                    print("存档数据库不可用，本次对局只在内存里进行：%s" % exc)
+                    say("存档数据库不可用，本次对局只在内存里进行：%s" % exc)
             self.say("游戏开始，从 " + self.player(self.current)["name"] + " 先手。", "turn")
             self.bump()
 
@@ -1062,7 +1111,7 @@ class Game:
                     db_save_game(self.game_id, self.phase, "over", self.summary(),
                                  json.dumps(self.snapshot(), ensure_ascii=False))
                 except Exception as exc:
-                    print("封存旧对局失败：%s" % exc)
+                    say("封存旧对局失败：%s" % exc)
             self.game_id = None
             players = self.players
             host = self.host
@@ -1083,6 +1132,59 @@ class Game:
             self.log_seq = 1
             self.event("reset")
             for p in players:
+                p.update(pos=0, money=self.start_money, alive=True)
+            self.bump()
+
+    def close_room(self) -> None:
+        """房主结束房间：除了自己，其他人全部清出去，回到等待大厅，可以直接开新房间。
+
+        和 restart 的区别：restart 是把牌桌重开、人还坐着；close_room 是把房间关掉重开，
+        其他人手上的登录态作废，得重新加入（也可以换个角色）。
+        """
+        with self.lock:
+            # 旧的那一局就此封存
+            if self.game_id is not None and self.db_ok:
+                try:
+                    db_save_game(self.game_id, self.phase, "over", self.summary(),
+                                 json.dumps(self.snapshot(), ensure_ascii=False))
+                except Exception as exc:
+                    say("封存旧对局失败：%s" % exc)
+            self.game_id = None
+            keep_token = self.host_token
+            keep_pid = self.tokens.get(keep_token) if keep_token else None
+            keep_player = self.player(keep_pid) if keep_pid is not None else None
+            self.players = [keep_player] if keep_player else []
+            self.tokens = {keep_token: keep_pid} if (keep_token and keep_pid is not None) else {}
+            # 房主当时是在观战：把观战身份留着，否则他自己也会被踢出去
+            self.watchers = {keep_token} if (keep_token and keep_pid is None) else set()
+            self.host = keep_pid if keep_player else None
+            self.board = [dict(t, i=n, owner=None, level=0, bought_turn=-1)
+                          for n, t in enumerate(TILE_DEFS)]
+            self.phase = "lobby"
+            self.turn_no = 0
+            self.current = None
+            self.dice = [0, 0]
+            self.last_steps = 0
+            self.pending = None
+            self.chance = None
+            self.settles = []
+            self.settle_lead = 0.0
+            self.settle_viewed = False
+            self.chance_viewed = False
+            self.buy_viewed = False
+            self.handoff_viewed = False
+            self.handoff_ack = False
+            self.skip_roll_delay = False
+            self.land = None
+            self.trades = []
+            self.trade_seq = 0
+            self.winner = None
+            self.frozen = None
+            self.log = [{"id": 1, "kind": "sys", "pid": None,
+                        "text": "房主结束了房间，其他人需要重新加入。"}]
+            self.log_seq = 1
+            self.event("reset")
+            for p in self.players:
                 p.update(pos=0, money=self.start_money, alive=True)
             self.bump()
 
@@ -1319,7 +1421,8 @@ class Game:
                 p["money"] -= amount
                 if other:
                     other["money"] += amount
-                self.say(f"{p['name']} 踩到 {other['name'] if other else '?'} 的「{e.get('name') or ''}」，付租金 {amount}",
+                where = other["name"] if other else "?"
+                self.say(f"{p['name']} 踩到 {where} 的「{e.get('name') or ''}」，付租金 {amount}",
                          "pay", p["id"])
                 self.event("rent", pid=p["id"], tile=e.get("tile"), name=e.get("name"), amount=-amount)
                 self._bankrupt_check(p)
@@ -1693,7 +1796,7 @@ class Game:
                     try:
                         self._ai_trade(p, intent, end_turn=False)
                     except ValueError as exc:
-                        print("[ai] 换地计划没发出去：%s" % exc)
+                        say("[ai] 换地计划没发出去：%s" % exc)
                         p["ai_trade_next"] = None
                 self._local_step(pid, "roll")
             else:
@@ -1734,7 +1837,7 @@ class Game:
                         self.pass_buy(pid)
         except ValueError as exc:
             # 决策撞上规则（钱不够之类）：保守收尾，别把局势卡死
-            print("人机 %s 动作失败：%s" % (p["name"], exc))
+            say("人机 %s 动作失败：%s" % (p["name"], exc))
             try:
                 if self.phase == "buy":
                     self.pass_buy(pid)
@@ -1774,7 +1877,8 @@ class Game:
                 tile["name"], tile["price"], tile["rent"],
                 GROUP_NAMES[tile["group"]] if tile.get("group") is not None else "?",
                 me["money"] - tile["price"]))
-            lines.append("【这次的决策】buy.want 决定买不买，maxPrice 是你愿出的上限；land 这次用不上（随便填合法值即可）。")
+            lines.append("【这次的决策】buy.want 决定买不买，maxPrice 是你愿出的上限；"
+                         "land 这次用不上（随便填合法值即可）。")
         else:
             cost = upgrade_cost(tile)
             fresh = int(tile.get("bought_turn", -1)) == self.turn_no
@@ -1784,7 +1888,8 @@ class Game:
                 ("—（已满级）" if cost is None else str(cost)),
                 self.rent_of_next(tile) if cost is not None else self.rent_of(tile),
                 "；本回合刚买，不能升" if fresh else ""))
-            lines.append("【这次的决策】land.upgrade 决定升不升，maxCost 是你愿付的上限；buy 这次用不上（随便填合法值即可）。")
+            lines.append("【这次的决策】land.upgrade 决定升不升，maxCost 是你愿付的上限；"
+                         "buy 这次用不上（随便填合法值即可）。")
 
         mine = [self.board[i] for i in self.props_of(me["id"])]
         if mine:
@@ -1814,7 +1919,8 @@ class Game:
                     x["name"],
                     "、".join("%s(色组%s 租%d)" % (t["name"], GROUP_NAMES[t.get("group")],
                                                   self.rent_of(t)) for t in props)))
-        my_names = "、".join("%s(色组%s)" % (t["name"], GROUP_NAMES[t.get("group")]) for t in mine) if mine else "还没有"
+        my_names = ("、".join("%s(色组%s)" % (t["name"], GROUP_NAMES[t.get("group")])
+                            for t in mine) if mine else "还没有")
         lines.append("【换地·下回合开局才发】你的地：%s" % my_names)
         if others_line:
             lines.append("【别人的地】" + "；".join(others_line))
@@ -1934,11 +2040,11 @@ class Game:
                     self.pass_buy(pid)
                 return
             if tile.get("owner") == pid:
-                l = plan.get("land") or {}
+                land = plan.get("land") or {}
                 cost = upgrade_cost(tile)
                 fresh = int(tile.get("bought_turn", -1)) == self.turn_no
-                cap = l.get("maxCost")
-                if (l.get("upgrade") and cost is not None and not fresh
+                cap = land.get("maxCost")
+                if (land.get("upgrade") and cost is not None and not fresh
                         and int(p["money"]) >= int(cost) and (cap is None or int(cost) <= int(cap))):
                     self.upgrade(pid, tile["i"])
                 else:
@@ -1946,7 +2052,7 @@ class Game:
                 return
             raise ValueError("落点不是无主地也不是自己的地")
         except ValueError as exc:
-            print("[ai] 落点决策在当前局面走不通：%s" % exc)
+            say("[ai] 落点决策在当前局面走不通：%s" % exc)
             try:
                 if self.phase == "buy":
                     self.pass_buy(pid)
@@ -2043,7 +2149,7 @@ class Game:
                         norm = self._ai_plan_norm(plan)
                     except ValueError as exc:
                         reason = str(exc)
-                        print("[ai] %s 第 %d 次计划被打回：%s" % (cur["name"], attempt, reason))
+                        say("[ai] %s 第 %d 次计划被打回：%s" % (cur["name"], attempt, reason))
                         continue
                     cur["thinking"] = False
                     cur["ai_plan"] = norm
@@ -2093,8 +2199,8 @@ class Game:
             with AI_FAIL_LOG.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(item, ensure_ascii=False) + "\n")
         except OSError as exc:
-            print("AI 失败样本没写进文件：%s" % exc)
-        print("[ai] 失败样本：%s" % json.dumps(item, ensure_ascii=False)[:200])
+            say("AI 失败样本没写进文件：%s" % exc)
+        say("[ai] 失败样本：%s" % json.dumps(item, ensure_ascii=False)[:200])
 
     def _bot_trade_step(self, version: int, trade_id: int) -> None:
         with self.lock:
@@ -2608,7 +2714,7 @@ class Game:
 
     # ---------------------------------------------------------------- 入口
     ADMIN_ACTIONS = {
-        "start", "restart", "pause", "resume",
+        "start", "restart", "close_room", "pause", "resume",
         "settings", "bot_add", "bot_remove", "bot_level",
     }
 
@@ -2623,6 +2729,8 @@ class Game:
                 self.start()
             elif action == "restart":
                 self.restart()
+            elif action == "close_room":
+                self.close_room()
             elif action == "pause":
                 self.pause()
             elif action == "resume":
@@ -2675,11 +2783,21 @@ class Game:
 game = Game()
 
 
+def ws_frame(payload: bytes, opcode: int = 0x1) -> bytes:
+    """服务端 -> 客户端帧（不掩码）。"""
+    n = len(payload)
+    if n < 126:
+        head = struct.pack(">BB", 0x80 | opcode, n)
+    elif n < 65536:
+        head = struct.pack(">BBH", 0x80 | opcode, 126, n)
+    else:
+        head = struct.pack(">BBQ", 0x80 | opcode, 127, n)
+    return head + payload
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "MonopolyLAN/2.0"
-
-    def log_message(self, fmt: str, *args) -> None:
-        sys.stderr.write("%s  %s\n" % (self.log_date_time_string(), fmt % args))
+    protocol_version = "HTTP/1.1"      # /ws 的 101 必须是 1.1，浏览器才认
 
     # -------------------------------------------------------------- 输出
     def _json(self, data: dict, code: int = 200) -> None:
@@ -2768,6 +2886,10 @@ class Handler(BaseHTTPRequestHandler):
             self._events(token)
             return
 
+        if parsed.path == "/ws":
+            self._ws(token)
+            return
+
         self._error("没有这个地址", 404)
 
     def _events(self, token: str) -> None:
@@ -2801,6 +2923,95 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
+
+    # ---------------------------------------------------------- WebSocket
+    # 同一个页面对两种链路自适应：局域网 / 安卓端内置服务用 SSE（/api/events），
+    # 走公网隧道时前端优先用 /ws，因为隧道会缓冲 text/event-stream。
+    def _ws(self, token: str) -> None:
+        if not game.can_view(token):
+            self._error("登录状态失效", 401)
+            return
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key:
+            self._error("缺少 Sec-WebSocket-Key", 400)
+            return
+
+        accept = base64.b64encode(
+            hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        self.wfile.flush()
+
+        self.close_connection = True
+        pid = game.pid_of(token)
+
+        stop = threading.Event()
+        threading.Thread(target=self._ws_reader, args=(stop,), daemon=True).start()
+
+        last = -1
+        last_ping = time.time()
+        try:
+            with game.lock:
+                last = game.version
+                first = json.dumps(game.view(pid, token), ensure_ascii=False)
+            self.wfile.write(ws_frame(first.encode("utf-8")))
+            self.wfile.flush()
+
+            while not stop.is_set():
+                with game.lock:
+                    changed = game.lock.wait_for(
+                        lambda: game.version != last, timeout=2.0)
+                    if changed:
+                        last = game.version
+                        payload = json.dumps(game.view(pid, token),
+                                             ensure_ascii=False).encode("utf-8")
+                    else:
+                        payload = None
+                if payload is not None:
+                    self.wfile.write(ws_frame(payload))
+                    self.wfile.flush()
+                    last_ping = time.time()
+                elif time.time() - last_ping >= WS_PING_EVERY:
+                    self.wfile.write(ws_frame(b"", opcode=0x9))   # ping
+                    self.wfile.flush()
+                    last_ping = time.time()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            pass
+        finally:
+            stop.set()
+
+    def _ws_reader(self, stop: threading.Event) -> None:
+        """只做一件事：发现对方断开就停掉推送循环；顺带清掉浏览器发来的 pong。"""
+        sock = self.connection
+        try:
+            sock.settimeout(1.0)
+        except OSError:
+            return
+        try:
+            while not stop.is_set():
+                try:
+                    chunk = sock.recv(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+        finally:
+            stop.set()
+            try:
+                sock.settimeout(30.0)
+            except OSError:
+                pass
+
+    def log_message(self, fmt: str, *args) -> None:
+        # /ws 每帧都会重建连接日志，静音掉，其余照旧
+        if "/ws" in (fmt % args):
+            return
+        LOG.info("%s  %s", self.log_date_time_string(), fmt % args)
 
     # -------------------------------------------------------------- POST
     def do_POST(self) -> None:
@@ -2869,6 +3080,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
             return
 
+        if parsed.path == "/api/chat":
+            try:
+                game.chat(token, str(payload.get("text", "")))
+            except ValueError as exc:
+                self._error(str(exc), 409)
+                return
+            self._json({"ok": True})
+            return
+
         if parsed.path == "/api/action":
             try:
                 game.act(token, str(payload.get("action", "")), payload)
@@ -2897,6 +3117,7 @@ def local_ip() -> str:
 
 
 def main() -> int:
+    setup_logging()
     parser = argparse.ArgumentParser(
         description="大富翁局域网服务端",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -2907,30 +3128,30 @@ def main() -> int:
     args = parser.parse_args()
 
     if not (WEB / "index.html").exists():
-        print(f"缺少页面文件：{WEB / 'index.html'}")
+        say(f"缺少页面文件：{WEB / 'index.html'}")
         return 1
 
     try:
         db_init()
         games = len(db_list_games())
-        print(f"  存档数据库 : {DB_PATH.name}（已有 {games} 局历史存档）")
+        say(f"  存档数据库 : {DB_PATH.name}（已有 {games} 局历史存档）")
     except Exception as exc:
-        print(f"  存档数据库不可用，将以纯内存模式运行：{exc}")
+        say(f"  存档数据库不可用，将以纯内存模式运行：{exc}")
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.daemon_threads = True
 
     ip = local_ip()
-    print("=" * 52)
-    print("  大富翁 · 局域网联机")
-    print(f"  本机打开 : http://127.0.0.1:{args.port}/")
+    say("=" * 52)
+    say("  大富翁 · 局域网联机")
+    say(f"  本机打开 : http://127.0.0.1:{args.port}/")
     if ip:
-        print(f"  手机/其它电脑 : http://{ip}:{args.port}/")
+        say(f"  手机/其它电脑 : http://{ip}:{args.port}/")
     else:
-        print(f"  手机/其它电脑 : http://<本机局域网IP>:{args.port}/")
-    print("  同一 WiFi 下打开地址即可，2 到 4 人同局")
-    print("  按 Ctrl+C 停止")
-    print("=" * 52, flush=True)
+        say(f"  手机/其它电脑 : http://<本机局域网IP>:{args.port}/")
+    say("  同一 WiFi 下打开地址即可，2 到 4 人同局")
+    say("  按 Ctrl+C 停止")
+    say("=" * 52, flush=True)
 
     if FROZEN and not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(
@@ -2939,7 +3160,7 @@ def main() -> int:
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n已停止。")
+        say("\n已停止。")
     finally:
         httpd.server_close()
     return 0

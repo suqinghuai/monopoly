@@ -13,11 +13,23 @@ tests/mock_requests.jsonl
 
 # 打包产物（通过 GitHub Release 发布，不进源码库）
 dist/
+dist/*.spec
+dist/cloudflared.exe
 build/
 *.spec
+*.zip
+
+# Android 构建缓存
+.gradle/
+local.properties
+Android/**/build/
+Android/app/src/main/assets/www/
+Android/release/
+Android/salvage/
 
 # Python
 __pycache__/
+.ruff_cache/
 *.py[cod]
 .venv/
 venv/
